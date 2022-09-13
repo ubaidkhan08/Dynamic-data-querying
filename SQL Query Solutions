@@ -1,0 +1,224 @@
+Q1 What is the number of campaigns in each month with at least one legit donation? How many donors in such campaigns? What is the average amount donated? Total number of campaigns that were started. Total number of campaigns that raised money. - is there a criteria of minimum amount, minimum number of donors to be considered for a legit donation?
+
+ANS:
+SELECT EXTRACT(Month from creation_date) as month, EXTRACT(year from creation_date) as year, count(DISTINCT campaign_id) as Num_campaign,count(distinct donor_entity_details_id)as Num_donors,avg(donated_amount)as Avg_Amt_Donated
+FROM mysql_redshift.order_details AS Order_details
+WHERE month is not null and year = '2021' AND transaction_return_status = '200'
+GROUP BY month, year
+ORDER BY month;
+
+
+
+
+Q2 Get the list of top 3 donors (per donated amount) for each month of 2021. (non SIP)
+
+ANS:
+SELECT *
+FROM (SELECT DISTINCT id, donor_first_name, donated_amount, donor_entity_details_id,
+EXTRACT(month FROM creation_date) AS month, EXTRACT(year FROM creation_date) AS year, ROW_NUMBER() OVER(PARTITION BY month ORDER BY donated_amount DESC) AS Rnk
+FROM mysql_redshift.order_details
+WHERE subscription_id=0 and year>='2021'
+ORDER BY month)
+WHERE Rnk <= '3'
+
+
+
+
+
+Q3 What is the number of new donors and repeat donors each month? Average donated amount? Average number of campaigns donated?
+
+ANS:
+WITH P1 AS(SELECT DISTINCT donor_entity_details_id, donated_amount, creation_date, EXTRACT(month from creation_date) AS month, EXTRACT(year FROM creation_date) AS year,
+MIN(creation_date) OVER (PARTITION BY donor_entity_details_id) AS min_date
+FROM mysql_redshift.order_details AS OD
+WHERE year = '2021'
+ORDER BY donor_entity_details_id),
+
+P2 AS (SELECT *,
+CASE WHEN MAX(creation_date) = min_date THEN  'new_donor'
+WHEN MAX(creation_date) > min_date THEN  'old_donor'
+END AS donor_type
+FROM P1
+GROUP BY P1.donor_entity_details_id, P1.creation_date, P1.month, P1.year, P1.min_date, P1.donated_amount
+ORDER BY P1.month),
+ 
+ P3 AS (SELECT month, avg(donated_amount) as avg_amt_new, COUNT(donor_entity_details_id)as no_old_donor from P2 where donor_type='old_donor' group by month),
+ 
+ P4 AS (SELECT month, AVG(donated_amount) AS avg_amt_old, COUNT(donor_entity_details_id) AS no_new_donor from P2 where donor_type='new_donor' group by month)
+ SELECT * FROM P3 natural join P4 ORDER BY month
+
+
+
+
+
+Q4  Monthly avg donation, num_donors by campaign type - personal, ngo or ad campaigns. 
+
+ANS:
+SELECT DISTINCT Extract(Month from DATE(datetime)) as month, 
+COUNT(case WHEN campaign.parent_cause_id = 48 THEN campaign.parent_entity_details_id END) AS ngo_num_campaigns,
+COUNT(case WHEN campaign.parent_cause_id IN (149) THEN campaign.parent_entity_details_id END) AS ad_num_campaigns,
+COUNT(case WHEN campaign.parent_cause_id IN (20,49) THEN campaign.parent_entity_details_id END) AS Personal_num_campaigns,
+AVG(case when entity_type = 'order_created' 
+			AND order_details.transaction_return_status = 200 
+			AND order_details.payment_gateway not in ('paytm_qr','benow','autocollect_cashfree') 
+			AND order_details.payment_gateway not like '%direct%' 
+			AND order_details.payment_gateway not like '%Direct%'
+			AND order_details.subscription_id = 0 
+			AND order_details.parent_order_id = 0 THEN order_details.donated_amount END) as avg_donation 
+
+FROM mysql_redshift.user_conversion  
+INNER JOIN mysql_redshift.campaign on user_conversion.event_type_id = campaign.id
+INNER JOIN mysql_redshift.order_details on user_conversion.info_2 = order_details.id and entity_type = 'order_created'
+
+	WHERE DATE(user_conversion.datetime) >= '2021-01-01'
+	AND DATE(user_conversion.datetime) <= '2022-01-01'
+
+	AND campaign.parent_cause_id IN(20,49,149,48)
+	GROUP BY month
+	ORDER BY month
+	
+	
+
+
+Q5 In 2021, what are the top 10 campaigns by average donation size? List the following attributes -> campaign_id, campaign_name, campaign_cause, type, cause_id, start_date, end_date, amount_requested, donated_amount, year, etc!
+
+ANS:
+SELECT DISTINCT OD.campaign_id, C.title as campaign_name, S.campaign_cause,
+        CASE WHEN C.parent_cause_id = 48 THEN 'NGO'
+        WHEN C.parent_cause_id = 149 THEN 'Ad'
+        WHEN C.parent_cause_id IN (20,49) THEN 'Personal' END AS Campaign_type,
+    C.cause_id, C.start_date, C.end_date, C.amount_requested AS Campaign_goal, OD.donated_amount AS amt_donated,
+    EXTRACT(month FROM C.creation_date) AS month, EXTRACT(year FROM c.creation_date) AS year,
+    CASE WHEN amt_donated >= campaign_goal THEN 'YES' ELSE 'NO' END AS Met_goal
+    
+FROM mysql_redshift.order_details as OD
+INNER JOIN mysql_redshift.campaign as C ON C.creator_entity_details_id = OD.creator_entity_details_id
+INNER JOIN mysql_redshift.subscriptions as S ON S.donor_entity_details_id = OD.donor_entity_details_id
+
+WHERE year = '2021'
+ORDER BY amt_donated DESC
+LIMIT 10
+
+
+
+
+
+Q6 For each month, what is the currency split? Donations & donors in INR vs other currencies?
+
+ANS:
+SELECT t1.year, t1.month, t1.INR_donors, t1.INR_donated_amt, t2.Other_donors, t2.OTHER_donated_amt
+FROM
+(SELECT Extract(Month from creation_date) as month,extract(year from creation_date) as year, count(iso_currency) AS INR_donors, SUM(donated_amount) AS INR_donated_amt
+FROM mysql_redshift.order_details as Order_details
+WHERE month is not null and year = '2021' and donor_country= 'IN'
+GROUP BY month,year
+ORDER BY month) t1
+
+INNER JOIN
+
+(SELECT Extract(Month from creation_date) as month,extract(year from creation_date) as year, count(iso_currency) AS Other_donors, SUM(donated_amount) AS OTHER_donated_amt
+FROM mysql_redshift.order_details as Order_details
+WHERE month is not null and year = '2021' and donor_country != 'IN'
+GROUP BY month,year
+ORDER BY month) t2
+ON t1.month = t2.month
+
+
+
+
+
+Q7 As of today, how many subscribers do we have in each state (active, lapsed, etc)? Prioritize ->status_flag - 1> 2>5>4>3 ; if someone is status_flag = 1, then this user should not be counted in status_flags lower in priority. Suppose a donor canceled a subscription (status_flag = 4) and then subscribes again (status_flag = 1), then person should only be counted ONCE in status_flag = 1
+
+ANS:
+SELECT t1.SignUps, t2.Status_1_Users, t3.Status_2_Users, t4.Status_3_Users, t5.Status_4_Users, t6.Status_5_Users
+FROM
+(SELECT  COUNT(DISTINCT donor_entity_details_id) AS SignUps
+FROM mysql_redshift.subscriptions as Subscriptions) t1
+
+CROSS JOIN
+
+(SELECT  COUNT(first_flag_prior) AS Status_1_Users
+FROM (SELECT MIN(status_flag) AS first_flag_prior FROM mysql_redshift.subscriptions as Subscriptions  GROUP BY donor_entity_details_id HAVING first_flag_prior = 1)
+) t2
+
+CROSS JOIN
+
+(SELECT  COUNT(first_flag_prior) AS Status_2_Users
+FROM (SELECT MIN(status_flag) AS first_flag_prior FROM mysql_redshift.subscriptions as Subscriptions  GROUP BY donor_entity_details_id HAVING first_flag_prior = 2)
+) t3
+
+CROSS JOIN
+
+(SELECT  COUNT(first_flag_prior) AS Status_3_Users
+FROM (SELECT MIN(status_flag) AS first_flag_prior FROM mysql_redshift.subscriptions as Subscriptions  GROUP BY donor_entity_details_id HAVING first_flag_prior = 3)
+) t4
+
+CROSS JOIN
+
+(SELECT  COUNT(first_flag_prior) AS Status_4_Users
+FROM (SELECT MIN(status_flag) AS first_flag_prior FROM mysql_redshift.subscriptions as Subscriptions  GROUP BY donor_entity_details_id HAVING first_flag_prior = 4)
+) t5
+
+CROSS JOIN (SELECT  COUNT(first_flag_prior) AS Status_5_Users
+FROM (SELECT MIN(status_flag) AS first_flag_prior FROM mysql_redshift.subscriptions as Subscriptions  GROUP BY donor_entity_details_id HAVING first_flag_prior = 5)
+) t6
+
+
+
+
+
+Q8  Of the total active signups (status_flag = 1) today, how many of them are M1 active (successful transaction 15 days after sign-up date)? (do it at subscription level) 
+
+ANS:
+SELECT t1.Total_Active_SignUps, t2.M1_Active_Signups
+FROM
+(SELECT count(DISTINCT donor_entity_details_id) AS Total_Active_SignUps
+FROM mysql_redshift.subscriptions AS Subscriptions
+WHERE status_flag = 1) t1
+
+CROSS JOIN
+
+(SELECT COUNT(DISTINCT donor_entity_details_id) AS M1_Active_Signups
+FROM mysql_redshift.subscriptions AS Subscriptions
+WHERE update_time - creation_time <= '0 years 0 mons 15 days 0 hours 0 mins 0 secs' AND status_flag = 1) t2
+
+
+
+
+
+Q9 Of the total active signups (status_flag = 1) today, how many of them are M1 active (successful transaction 15 days after sign-up date)? (do it at subscription level) 
+
+ANS:
+SELECT t1.trial_signups, t2.M1_Active_Signups_trial
+FROM
+(SELECT COUNT(transaction_return_status) AS trial_signups
+FROM mysql_redshift.order_details AS OD
+WHERE transaction_return_status = 'trial') t1
+
+CROSS JOIN
+
+(SELECT COUNT(donor_entity_details_id) AS M1_Active_Signups_trial
+FROM mysql_redshift.subscriptions AS Subscriptions
+WHERE update_time - creation_time <= '0 years 0 mons 15 days 0 hours 0 mins 0 secs' AND status_flag = 1) t2
+
+
+
+
+
+Q10 SIP User Profiling - for each user - 1) sign-up date 2) sign-up payment mode 3) SIP amount 4) User tenure 5) Pre-SIP donations 6) Pre-SIP donation average 7) Post-SIP donation 8) Post SIP Donation average 9) Gap b/w LAST non-SIP donation & SIP sign-up 10) Gap b/w FIRST non-SIP donation & SIP sign-up 
+
+ANS:
+SELECT Extract(Month from SF.sign_up_date) as month, EXTRACT(year from SF.sign_up_date) as year,
+        SF.donor_entity_details_id, SF.sign_up_date, final_payment_mode, SF.sip_amt, SF.sip_tenure,
+        MB.pre_sip_amt_total, MB.pre_sip_amt_total / MB.pre_sip_orders_total AS pre_sip_avg_amt,
+        (SF.sign_up_date - MB.last_presip_order_date) AS gap_btw_Last_and_sip,
+        (SF.sign_up_date - MB.first_presip_order_date) AS gap_btw_First_and_sip
+        
+FROM mysql_redshift.sip_signup_filter_view AS SF
+INNER JOIN mb_reports.as_pmm_segmentation_2021_donors AS MB ON MB.donor_entity_details_id = SF.donor_entity_details_id
+
+WHERE year = '2021'
+GROUP BY year, month, SF.donor_entity_details_id, SF.sign_up_date, SF.final_payment_mode, SF.sip_amt, SF.sip_tenure, MB.pre_sip_amt_total,
+        MB.pre_sip_orders_total, MB.first_presip_order_date, MB.last_presip_order_date
+ORDER BY month, SF.donor_entity_details_id
+
